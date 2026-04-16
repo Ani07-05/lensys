@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  background: transparent !important;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  /* Force GPU layer for the whole app */
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
+}
+
+/* Custom scrollbar for transcript */
+.transcript-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+.transcript-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.transcript-scroll::-webkit-scrollbar-thumb {
+  background: rgba(139, 92, 246, 0.4);
+  border-radius: 2px;
+}
+
+/* Glass morphism base */
+.glass {
+  background: rgba(10, 10, 20, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(139, 92, 246, 0.2);
+}

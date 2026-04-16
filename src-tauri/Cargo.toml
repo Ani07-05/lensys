@@ -1,0 +1,36 @@
+[package]
+name = "cluddy"
+version = "0.1.0"
+description = "Cluddy — floating AI buddy for developers"
+authors = []
+edition = "2021"
+
+[lib]
+name = "cluddy_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+base64 = "0.22"
+dotenvy = "0.15"
+xcap = "0.0.9"
+image = "0.25"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winuser"] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

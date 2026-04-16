@@ -1,0 +1,42 @@
+# Env — never commit
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+pnpm-lock.yaml
+package-lock.json
+
+# Build outputs
+dist/
+src-tauri/target/
+target/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+npm-debug.log*
+
+# Tauri generated
+src-tauri/gen/
+
+# Python leftover
+devlens/
+__pycache__/
+*.pyc
+*.pyo
+venv/
+
+# Claude memory
+.claude/
