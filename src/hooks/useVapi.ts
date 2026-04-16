@@ -95,19 +95,7 @@ export function useVapi(): UseVapiReturn {
         setStatus("error");
       });
 
-      if (assistantId && assistantId !== "your_vapi_assistant_id_here") {
-        await vapiAny.start(assistantId);
-      } else {
-        await vapiAny.start({
-          model: {
-            provider: "anthropic",
-            model: "claude-sonnet-4-20250514",
-            messages: [{ role: "system", content: "You are Cluddy, a floating AI buddy for developers. Screen context will be injected as system messages. Be concise, voice-only, no markdown." }],
-          },
-          voice: { provider: "11labs", voiceId: "paula" },
-          firstMessage: "Hey, what do you need help with?",
-        });
-      }
+      await vapiAny.start(assistantId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
