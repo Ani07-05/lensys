@@ -1,43 +1,46 @@
 use reqwest::Client;
 use serde_json::{json, Value};
 
-const COLLECTION: &str = "cluddy_memories";
-const VECTOR_SIZE: usize = 256;
+const COLLECTION: &str = "cluddy_memories_v2";
+const VECTOR_SIZE: usize = 768;
 
-/// Simple deterministic embedding: bag-of-chars n-grams hashed into a fixed-size float vector.
-/// Not semantic but consistent — good enough for cosine similarity on short text chunks.
-pub fn embed(text: &str) -> Vec<f32> {
-    let mut vec = vec![0.0f32; VECTOR_SIZE];
-    let bytes = text.as_bytes();
+async fn embed(client: &Client, text: &str, groq_api_key: &str) -> Result<Vec<f32>, String> {
+    let res = client
+        .post("https://api.groq.com/openai/v1/embeddings")
+        .header("Authorization", format!("Bearer {groq_api_key}"))
+        .json(&json!({ "model": "nomic-embed-text-v1.5", "input": text }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
-    for window in bytes.windows(3) {
-        let h = window.iter().fold(2166136261u32, |acc, &b| {
-            acc.wrapping_mul(16777619).wrapping_add(b as u32)
-        });
-        let idx = (h as usize) % VECTOR_SIZE;
-        vec[idx] += 1.0;
+    let body: Value = res.json().await.map_err(|e| e.to_string())?;
+    let embedding: Vec<f32> = body["data"][0]["embedding"]
+        .as_array()
+        .ok_or_else(|| "no embedding in response".to_string())?
+        .iter()
+        .filter_map(|v| v.as_f64().map(|f| f as f32))
+        .collect();
+
+    if embedding.len() != VECTOR_SIZE {
+        return Err(format!("expected {VECTOR_SIZE} dims, got {}", embedding.len()));
     }
-
-    // L2-normalize
-    let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 1e-8 {
-        vec.iter_mut().for_each(|x| *x /= norm);
-    }
-    vec
+    Ok(embedding)
 }
 
-pub struct QdrantClient {
-    client: Client,
+pub struct QdrantClient<'a> {
+    client: &'a Client,
     base_url: String,
     api_key: String,
+    groq_api_key: String,
 }
 
-impl QdrantClient {
-    pub fn new(base_url: &str, api_key: &str) -> Self {
+impl<'a> QdrantClient<'a> {
+    pub fn new(client: &'a Client, base_url: &str, api_key: &str, groq_api_key: &str) -> Self {
         Self {
-            client: Client::new(),
+            client,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
+            groq_api_key: groq_api_key.to_string(),
         }
     }
 
@@ -48,7 +51,6 @@ impl QdrantClient {
     pub async fn ensure_collection(&self) -> Result<(), String> {
         let url = format!("{}/collections/{}", self.base_url, COLLECTION);
 
-        // Check if it exists
         let res = self
             .client
             .get(&url)
@@ -58,16 +60,12 @@ impl QdrantClient {
             .map_err(|e| e.to_string())?;
 
         if res.status().as_u16() == 404 {
-            // Create it
             let create_res = self
                 .client
                 .put(&url)
                 .header(self.auth().0, self.auth().1)
                 .json(&json!({
-                    "vectors": {
-                        "size": VECTOR_SIZE,
-                        "distance": "Cosine"
-                    }
+                    "vectors": { "size": VECTOR_SIZE, "distance": "Cosine" }
                 }))
                 .send()
                 .await
@@ -83,7 +81,7 @@ impl QdrantClient {
     }
 
     pub async fn upsert(&self, text: &str, point_type: &str) -> Result<(), String> {
-        let vector = embed(text);
+        let vector = embed(self.client, text, &self.groq_api_key).await?;
         let id = uuid::Uuid::new_v4().to_string();
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -100,11 +98,7 @@ impl QdrantClient {
                 "points": [{
                     "id": id,
                     "vector": vector,
-                    "payload": {
-                        "text": text,
-                        "type": point_type,
-                        "timestamp": ts
-                    }
+                    "payload": { "text": text, "type": point_type, "timestamp": ts }
                 }]
             }))
             .send()
@@ -120,7 +114,7 @@ impl QdrantClient {
     }
 
     pub async fn search(&self, query: &str, limit: u64) -> Result<Vec<String>, String> {
-        let vector = embed(query);
+        let vector = embed(self.client, query, &self.groq_api_key).await?;
         let url = format!("{}/collections/{}/points/search", self.base_url, COLLECTION);
 
         let res = self
@@ -131,7 +125,7 @@ impl QdrantClient {
                 "vector": vector,
                 "limit": limit,
                 "with_payload": true,
-                "score_threshold": 0.3
+                "score_threshold": 0.6
             }))
             .send()
             .await
@@ -142,14 +136,11 @@ impl QdrantClient {
         }
 
         let body: Value = res.json().await.map_err(|e| e.to_string())?;
-
         let results: Vec<String> = body["result"]
             .as_array()
             .unwrap_or(&vec![])
             .iter()
-            .filter_map(|item| {
-                item["payload"]["text"].as_str().map(|s| s.to_string())
-            })
+            .filter_map(|item| item["payload"]["text"].as_str().map(|s| s.to_string()))
             .collect();
 
         Ok(results)

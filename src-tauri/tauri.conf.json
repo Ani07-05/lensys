@@ -14,8 +14,8 @@
       {
         "label": "main",
         "title": "Cluddy",
-        "width": 80,
-        "height": 80,
+        "width": 280,
+        "height": 44,
         "x": 100,
         "y": 100,
         "decorations": false,
