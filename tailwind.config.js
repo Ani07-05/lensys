@@ -27,6 +27,14 @@ export default {
           from: { opacity: "0" },
           to: { opacity: "1" },
         },
+        fadeSlideIn: {
+          from: { opacity: "0", transform: "translateY(3px)" },
+          to:   { opacity: "1", transform: "translateY(0)" },
+        },
+        pulse: {
+          "0%, 100%": { opacity: "1" },
+          "50%": { opacity: "0.4" },
+        },
         slideUp: {
           from: { transform: "translateY(20px)", opacity: "0" },
           to: { transform: "translateY(0)", opacity: "1" },

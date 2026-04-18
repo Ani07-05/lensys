@@ -1,24 +1,22 @@
 use reqwest::Client;
 use serde_json::{json, Value};
 
-pub async fn analyze_screenshot(base64_image: &str, api_key: &str) -> Result<String, String> {
-    let client = Client::new();
-
+pub async fn analyze_screenshot(client: &Client, base64_image: &str, api_key: &str) -> Result<String, String> {
     let body = json!({
         "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-        "max_tokens": 120,
+        "max_tokens": 200,
         "messages": [{
             "role": "user",
             "content": [
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": format!("data:image/png;base64,{}", base64_image)
+                        "url": format!("data:image/jpeg;base64,{}", base64_image)
                     }
                 },
                 {
                     "type": "text",
-                    "text": "One sentence: what code/error is on this screen? Be specific — file name, language, error message if visible."
+                    "text": "One sentence: what is the user doing right now? Include app/tool name, file or URL if visible, and any error message. Cover all activity types (coding, browsing, terminal, reading docs, video, design, etc.)."
                 }
             ]
         }]
