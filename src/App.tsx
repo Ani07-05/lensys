@@ -7,19 +7,34 @@ import { useVapi } from "./hooks/useVapi";
 
 type AppMode = "orb" | "calling" | "expanded";
 
-interface EnvKeys { vapi_public_key: string; vapi_assistant_id: string; }
+interface EnvKeys {
+  vapi_public_key: string;
+  vapi_assistant_id: string;
+  has_claude: boolean;
+  has_search: boolean;
+  has_groq: boolean;
+}
 
 export default function App() {
   const [mode, setMode] = useState<AppMode>("orb");
-  const [envKeys, setEnvKeys] = useState<EnvKeys>({ vapi_public_key: "", vapi_assistant_id: "" });
+  const [envKeys, setEnvKeys] = useState<EnvKeys>({
+    vapi_public_key: "",
+    vapi_assistant_id: "",
+    has_claude: false,
+    has_search: false,
+    has_groq: false,
+  });
 
-  const { status, transcript, volumeLevel, analysis, memories, currentSpeech, currentUserSpeech, startCall, stopCall, error } = useVapi();
+  const {
+    status, transcript, volumeLevel, codeContext, memories,
+    currentSpeech, currentUserSpeech, startCall, stopCall,
+    sendTextMessage, askClaude, attachClipboardContext, searchWeb, error,
+  } = useVapi();
 
   useEffect(() => {
     invoke<EnvKeys>("get_env_keys").then(setEnvKeys).catch(console.error);
   }, []);
 
-  // Ctrl+Shift+A — start call instantly, no screenshot delay
   const handleHotkey = useCallback(async () => {
     if (mode === "calling" || mode === "expanded") {
       stopCall();
@@ -28,49 +43,66 @@ export default function App() {
       return;
     }
     if (mode !== "orb") return;
-
     setMode("calling");
     startCall(envKeys.vapi_public_key, envKeys.vapi_assistant_id)
       .catch((e) => console.error("Vapi start:", e));
   }, [mode, envKeys, startCall, stopCall]);
 
-  // Ctrl+Shift+S — toggle full panel while in call
   const handleTogglePanel = useCallback(async () => {
     if (mode === "calling") {
       await invoke("set_window_mode", { mode: "expanded" }).catch(() => {});
       setMode("expanded");
     } else if (mode === "expanded") {
       await invoke("set_window_mode", { mode: "orb" }).catch(() => {});
-      setMode("calling");
+      setMode(status === "idle" || status === "error" ? "orb" : "calling");
     }
-  }, [mode]);
+  }, [mode, status]);
+
+  // Ctrl+Shift+T — open expanded panel directly to text mode
+  const handleTextMode = useCallback(async () => {
+    if (mode !== "expanded") {
+      await invoke("set_window_mode", { mode: "expanded" }).catch(() => {});
+      setMode("expanded");
+    }
+    await attachClipboardContext().catch(() => {});
+  }, [mode, attachClipboardContext]);
 
   useEffect(() => {
     const u1 = listen("cluddy:hotkey", () => handleHotkey());
     const u2 = listen("cluddy:panel", () => handleTogglePanel());
-    return () => { u1.then((f) => f()); u2.then((f) => f()); };
-  }, [handleHotkey, handleTogglePanel]);
+    const u3 = listen("cluddy:text_mode", () => handleTextMode());
+    return () => {
+      u1.then((f) => f());
+      u2.then((f) => f());
+      u3.then((f) => f());
+    };
+  }, [handleHotkey, handleTogglePanel, handleTextMode]);
 
-  // Keep a ref to current status so the delayed timeout can double-check
   const statusRef = useRef(status);
   useEffect(() => { statusRef.current = status; }, [status]);
 
-  // Auto-return to orb when call ends or errors
+  const hadActiveCallRef = useRef(false);
   useEffect(() => {
-    const shouldReturn = (mode === "calling" || mode === "expanded") &&
+    if (status === "connecting" || status === "connected" || status === "speaking" || status === "listening") {
+      hadActiveCallRef.current = true;
+    }
+  }, [status]);
+
+  // Auto-return to orb when an actual call ends. Idle text mode should stay open.
+  useEffect(() => {
+    const shouldReturn = hadActiveCallRef.current &&
+      (mode === "calling" || mode === "expanded") &&
       (status === "idle" || status === "error");
     if (!shouldReturn) return;
-    // Use a longer delay so brief Vapi reconnects don't kill the session
     const delay = status === "error" ? 4000 : 5000;
     const t = setTimeout(async () => {
-      // Double-check: only tear down if status is STILL idle/error
       if (statusRef.current !== "idle" && statusRef.current !== "error") return;
+      hadActiveCallRef.current = false;
       setMode("orb");
       await invoke("set_window_mode", { mode: "orb" }).catch(() => {});
     }, delay);
     return () => clearTimeout(t);
   }, [mode, status]);
-
 
   if (mode === "orb") {
     return <div className="w-full h-full" style={{ background: "transparent" }}><Orb /></div>;
@@ -86,6 +118,12 @@ export default function App() {
             you: {currentUserSpeech}
           </div>
         )}
+        {codeContext?.file_name && (
+          <div className="font-mono text-cyan-400/40 text-center px-2 mt-0.5 truncate"
+            style={{ fontSize: 8, maxWidth: 260 }}>
+            ⌨ {codeContext.file_name}{codeContext.language ? ` · ${codeContext.language}` : ""}
+          </div>
+        )}
         {error && (
           <div className="font-mono text-red-400/80 text-center px-2 mt-1"
             style={{ fontSize: 8, maxWidth: 260, wordBreak: "break-word" }}>
@@ -96,20 +134,28 @@ export default function App() {
     );
   }
 
+  const handleStop = async () => {
+    stopCall();
+    setMode("orb");
+    await invoke("set_window_mode", { mode: "orb" }).catch(() => {});
+  };
+
   return (
     <div className="w-full h-full glass rounded-2xl overflow-hidden" style={{ background: "rgba(8,6,18,0.9)" }}>
       <ExpandedPanel
         status={status}
         transcript={transcript}
         volumeLevel={volumeLevel}
-        analysis={analysis}
+        codeContext={codeContext}
         memories={memories}
+        currentSpeech={currentSpeech}
+        currentUserSpeech={currentUserSpeech}
         error={error}
-        onStop={async () => {
-          stopCall();
-          setMode("orb");
-          await invoke("set_window_mode", { mode: "orb" }).catch(() => {});
-        }}
+        onStop={handleStop}
+        onSendText={sendTextMessage}
+        onAskClaude={askClaude}
+        onAttachClipboard={attachClipboardContext}
+        onSearch={searchWeb}
       />
     </div>
   );

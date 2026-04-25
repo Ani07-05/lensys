@@ -11,64 +11,185 @@ export type VapiStatus =
   | "listening"
   | "error";
 
-interface AnalysisResult { analysis: string; memories: string[]; }
+export interface Symbol {
+  kind: string;
+  name: string;
+  line: number;
+}
+
+export interface CodeContext {
+  file_path: string | null;
+  file_name: string | null;
+  language: string | null;
+  content: string | null;
+  window_title: string;
+  active_app: string;
+  is_ide: boolean;
+  symbols: Symbol[];
+}
 
 interface UseVapiReturn {
   status: VapiStatus;
   transcript: string;
   volumeLevel: number;
-  analysis: string;
+  codeContext: CodeContext | null;
   memories: string[];
   currentSpeech: string;
   currentUserSpeech: string;
   startCall: (publicKey: string, assistantId: string) => Promise<void>;
   stopCall: () => void;
+  sendTextMessage: (text: string) => void;
+  askClaude: (question: string) => Promise<string>;
+  attachClipboardContext: () => Promise<CodeContext>;
+  searchWeb: (query: string) => Promise<SearchResult[]>;
   error: string | null;
 }
 
-const CAPTURE_INTERVAL_MS = 2500;
+export interface SearchResult {
+  title: string;
+  url: string;
+  content: string;
+}
+
+const CAPTURE_INTERVAL_MS = 3000;
+
+function formatCodeContext(ctx: CodeContext): string {
+  const parts: string[] = [];
+  if (ctx.file_name) {
+    parts.push(`[Code: ${ctx.file_name}${ctx.language ? ` (${ctx.language})` : ""}]`);
+  }
+  if (ctx.symbols.length > 0) {
+    const syms = ctx.symbols
+      .slice(0, 8)
+      .map((s) => `${s.kind} ${s.name}`)
+      .join(", ");
+    parts.push(`Symbols: ${syms}`);
+  }
+  if (ctx.content) {
+    const snippet = ctx.content.split("\n").slice(0, 30).join("\n");
+    parts.push(`\`\`\`\n${snippet}\n\`\`\``);
+  }
+  if (!ctx.is_ide && ctx.window_title) {
+    parts.push(`[Window: ${ctx.window_title}]`);
+  }
+  return parts.join("\n");
+}
 
 export function useVapi(): UseVapiReturn {
   const vapiRef = useRef<Vapi | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
   const captureIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const latestCaptureRef = useRef<AnalysisResult | null>(null);
+  const latestCtxRef = useRef<CodeContext | null>(null);
   const [status, setStatus] = useState<VapiStatus>("idle");
   const [transcript, setTranscript] = useState("");
   const [volumeLevel, setVolumeLevel] = useState(0);
-  const [analysis, setAnalysis] = useState("");
+  const [codeContext, setCodeContext] = useState<CodeContext | null>(null);
+  const [memories] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
   const [currentSpeech, setCurrentSpeech] = useState("");
   const [currentUserSpeech, setCurrentUserSpeech] = useState("");
-  const [memories, setMemories] = useState<string[]>([]);
-  const [error, setError] = useState<string | null>(null);
+
+  const appendTranscript = useCallback((speaker: "You" | "Cluddy", text: string) => {
+    setTranscript((prev) => prev ? `${prev}\n${speaker}: ${text}` : `${speaker}: ${text}`);
+  }, []);
+
+  const sendVapiMessage = useCallback((role: "user" | "system", content: string) => {
+    if (!vapiRef.current) return false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (vapiRef.current as any).send({
+      type: "add-message",
+      message: { role, content },
+    });
+    return true;
+  }, []);
 
   const stopCapturing = useCallback(() => {
     if (captureIntervalRef.current) {
       clearInterval(captureIntervalRef.current);
       captureIntervalRef.current = null;
     }
-    latestCaptureRef.current = null;
+    latestCtxRef.current = null;
   }, []);
 
   const startCapturing = useCallback(() => {
     stopCapturing();
     const tick = () => {
-      invoke<AnalysisResult>("capture_and_analyze")
-        .then((r) => {
-          latestCaptureRef.current = r;
-          if (r.memories?.length) setMemories(r.memories);
+      invoke<CodeContext>("get_code_context")
+        .then((ctx) => {
+          latestCtxRef.current = ctx;
+          setCodeContext(ctx);
         })
         .catch(() => {});
     };
-    tick(); // immediate first capture
+    tick();
     captureIntervalRef.current = setInterval(tick, CAPTURE_INTERVAL_MS);
   }, [stopCapturing]);
+
+  const sendTextMessage = useCallback((text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    appendTranscript("You", trimmed);
+    sendVapiMessage("user", trimmed);
+  }, [appendTranscript, sendVapiMessage]);
+
+  const attachClipboardContext = useCallback(async (): Promise<CodeContext> => {
+    const ctx = await invoke<CodeContext>("get_clipboard_context");
+    latestCtxRef.current = ctx;
+    setCodeContext(ctx);
+
+    const formatted = formatCodeContext(ctx);
+    if (formatted) {
+      sendVapiMessage("system", `[Clipboard selection]\n${formatted}`);
+    }
+
+    return ctx;
+  }, [sendVapiMessage]);
+
+  const askClaude = useCallback(async (question: string): Promise<string> => {
+    const trimmed = question.trim();
+    if (!trimmed) return "";
+
+    setError(null);
+    appendTranscript("You", trimmed);
+
+    if (!latestCtxRef.current?.content) {
+      await invoke<CodeContext>("get_code_context")
+        .then((ctx) => {
+          latestCtxRef.current = ctx;
+          setCodeContext(ctx);
+        })
+        .catch(() => {});
+    }
+
+    const reply = await invoke<string>("ask_claude", { question: trimmed });
+    appendTranscript("Cluddy", reply);
+    return reply;
+  }, [appendTranscript]);
+
+  const searchWeb = useCallback(async (query: string): Promise<SearchResult[]> => {
+    try {
+      const results = await invoke<SearchResult[]>("web_search", { query });
+      if (vapiRef.current && results.length > 0) {
+        const formatted = results
+          .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.content}`)
+          .join("\n\n");
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (vapiRef.current as any).send({
+          type: "add-message",
+          message: { role: "system", content: `[Web Search: ${query}]\n${formatted}` },
+        });
+      }
+      return results;
+    } catch {
+      return [];
+    }
+  }, []);
 
   const startCall = useCallback(async (publicKey: string, assistantId: string) => {
     try {
       setError(null);
       setTranscript("");
-      setAnalysis("");
+      setCodeContext(null);
       setStatus("connecting");
 
       unlistenRef.current?.();
@@ -79,21 +200,23 @@ export function useVapi(): UseVapiReturn {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const vapiAny = vapi as any;
 
-      const unlistenAnalysis = await listen<string>("cluddy:analysis", (event) => {
-        setAnalysis(event.payload);
+      const unlistenCtx = await listen<CodeContext>("cluddy:code_context", (event) => {
+        setCodeContext(event.payload);
       });
-      unlistenRef.current = unlistenAnalysis;
+      unlistenRef.current = unlistenCtx;
 
       vapi.on("call-start", () => {
         setStatus("connected");
         startCapturing();
-        // Inject whatever we already have from the pre-start capture
-        const cached = latestCaptureRef.current;
-        if (cached?.analysis) {
-          vapiAny.send({
-            type: "add-message",
-            message: { role: "system", content: `[Screen] ${cached.analysis}` },
-          });
+        const cached = latestCtxRef.current;
+        if (cached) {
+          const formatted = formatCodeContext(cached);
+          if (formatted) {
+            vapiAny.send({
+              type: "add-message",
+              message: { role: "system", content: formatted },
+            });
+          }
         }
       });
 
@@ -114,54 +237,50 @@ export function useVapi(): UseVapiReturn {
         if (now - lastVolUpdate > 120) { setVolumeLevel(vol); lastVolUpdate = now; }
       });
 
-      // Track whether we already injected a FRESH capture for the current user turn.
-      // Reset when the assistant finishes speaking (= new turn starts).
       let injectedThisTurn = false;
-      let pendingFreshCapture = false;
+      let pendingFresh = false;
 
       vapi.on("message", (msg: { type: string; transcript?: string; role?: string; transcriptType?: string }) => {
-        // ── User starts talking: inject the cached snapshot immediately for low latency,
-        //    then kick off a FRESH capture that will be injected when it completes.
         if (msg.type === "transcript" && msg.role === "user" && !injectedThisTurn) {
           injectedThisTurn = true;
-          // 1) Inject whatever is in the background cache NOW (≤2.5s old)
-          const cached = latestCaptureRef.current;
-          if (cached?.analysis) {
-            const memCtx = cached.memories.length
-              ? `\n[Past context]\n${cached.memories.join("\n")}`
-              : "";
-            vapiAny.send({
-              type: "add-message",
-              message: { role: "system", content: `[Screen] ${cached.analysis}${memCtx}` },
-            });
+          const cached = latestCtxRef.current;
+          if (cached) {
+            const formatted = formatCodeContext(cached);
+            if (formatted) {
+              vapiAny.send({
+                type: "add-message",
+                message: { role: "system", content: formatted },
+              });
+            }
           }
-          // 2) Fire a FRESH capture in the background — will arrive before Vapi's LLM call
-          //    because the user is still speaking for another second or two.
-          if (!pendingFreshCapture) {
-            pendingFreshCapture = true;
-            invoke<{ analysis: string; memories: string[] }>("capture_and_analyze")
-              .then((r) => {
-                latestCaptureRef.current = r;
-                if (r.memories?.length) setMemories(r.memories);
-                if (r.analysis) {
-                  const memCtx2 = r.memories.length
-                    ? `\n[Past context]\n${r.memories.join("\n")}`
-                    : "";
+          // Fire a fresh capture while user is still speaking
+          if (!pendingFresh) {
+            pendingFresh = true;
+            invoke<CodeContext>("get_code_context")
+              .then((ctx) => {
+                latestCtxRef.current = ctx;
+                setCodeContext(ctx);
+                const updated = formatCodeContext(ctx);
+                if (updated) {
                   vapiAny.send({
                     type: "add-message",
-                    message: { role: "system", content: `[Screen update] ${r.analysis}${memCtx2}` },
+                    message: { role: "system", content: `[Updated] ${updated}` },
                   });
                 }
               })
               .catch(() => {})
-              .finally(() => { pendingFreshCapture = false; });
+              .finally(() => { pendingFresh = false; });
           }
         }
 
         if (msg.type === "transcript" && msg.role === "assistant") {
           if (msg.transcriptType === "final") {
-            injectedThisTurn = false; // Reset for next user turn
+            injectedThisTurn = false;
             setCurrentSpeech("");
+            // Async wiki update from this turn
+            if (transcript) {
+              invoke("wiki_update_from_turn", { turn: transcript }).catch(() => {});
+            }
           } else {
             setCurrentSpeech(msg.transcript ?? "");
           }
@@ -175,7 +294,7 @@ export function useVapi(): UseVapiReturn {
           }
         }
 
-        if (msg.type === "transcript" && msg.transcript) {
+        if (msg.type === "transcript" && msg.transcriptType === "final" && msg.transcript) {
           const speaker = msg.role === "assistant" ? "Cluddy" : "You";
           setTranscript((prev) => prev ? `${prev}\n${speaker}: ${msg.transcript}` : `${speaker}: ${msg.transcript}`);
         }
@@ -183,14 +302,12 @@ export function useVapi(): UseVapiReturn {
 
       vapi.on("error", (err: unknown) => {
         console.error("Vapi error:", err);
-        // Extract a human-readable message from Vapi's error shapes
         let msg = "Voice error";
         const errObj = err as Record<string, unknown> | null;
         if (errObj) {
           const inner =
             (errObj.message as string) ||
-            ((errObj.error as Record<string, unknown>)?.message as string) ||
-            "";
+            ((errObj.error as Record<string, unknown>)?.message as string) || "";
           if (/microphone|permission|NotAllowed/i.test(inner)) {
             msg = "Microphone access denied — check browser permissions";
           } else if (/network|fetch|ERR_INTERNET/i.test(inner)) {
@@ -207,12 +324,9 @@ export function useVapi(): UseVapiReturn {
         setStatus("error");
       });
 
-      // Warm the cache before start() so call-start injection has data ready
-      await invoke<AnalysisResult>("capture_and_analyze")
-        .then((r) => {
-          latestCaptureRef.current = r;
-          if (r.memories?.length) setMemories(r.memories);
-        })
+      // Warm cache before start
+      await invoke<CodeContext>("get_code_context")
+        .then((ctx) => { latestCtxRef.current = ctx; setCodeContext(ctx); })
         .catch(() => {});
 
       await vapiAny.start(assistantId);
@@ -221,7 +335,7 @@ export function useVapi(): UseVapiReturn {
       setError(msg);
       setStatus("error");
     }
-  }, [startCapturing, stopCapturing]);
+  }, [startCapturing, stopCapturing, transcript]);
 
   const stopCall = useCallback(() => {
     vapiRef.current?.stop();
@@ -241,5 +355,20 @@ export function useVapi(): UseVapiReturn {
     };
   }, [stopCapturing]);
 
-  return { status, transcript, volumeLevel, analysis, memories, currentSpeech, currentUserSpeech, startCall, stopCall, error };
+  return {
+    status,
+    transcript,
+    volumeLevel,
+    codeContext,
+    memories,
+    currentSpeech,
+    currentUserSpeech,
+    startCall,
+    stopCall,
+    sendTextMessage,
+    askClaude,
+    attachClipboardContext,
+    searchWeb,
+    error,
+  };
 }
