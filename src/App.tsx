@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import Orb from "./components/Orb";
-import ExpandedPanel from "./components/ExpandedPanel";
+import ExpandedPanel from "./components/ExpandedPanel.tsx";
 import { useVapi } from "./hooks/useVapi";
 
 type AppMode = "orb" | "calling" | "expanded";
@@ -28,7 +28,8 @@ export default function App() {
   const {
     status, transcript, volumeLevel, codeContext, memories,
     currentSpeech, currentUserSpeech, startCall, stopCall,
-    sendTextMessage, askClaude, attachClipboardContext, searchWeb, error,
+    sendTextMessage, askClaude, runAction, applyAction,
+    attachClipboardContext, searchWeb, error,
   } = useVapi();
 
   useEffect(() => {
@@ -43,6 +44,7 @@ export default function App() {
       return;
     }
     if (mode !== "orb") return;
+    await invoke("set_window_mode", { mode: "calling" }).catch(() => {});
     setMode("calling");
     startCall(envKeys.vapi_public_key, envKeys.vapi_assistant_id)
       .catch((e) => console.error("Vapi start:", e));
@@ -53,18 +55,19 @@ export default function App() {
       await invoke("set_window_mode", { mode: "expanded" }).catch(() => {});
       setMode("expanded");
     } else if (mode === "expanded") {
-      await invoke("set_window_mode", { mode: "orb" }).catch(() => {});
-      setMode(status === "idle" || status === "error" ? "orb" : "calling");
+      const nextMode = status === "idle" || status === "error" ? "orb" : "calling";
+      await invoke("set_window_mode", { mode: nextMode }).catch(() => {});
+      setMode(nextMode);
     }
   }, [mode, status]);
 
   // Ctrl+Shift+T — open expanded panel directly to text mode
   const handleTextMode = useCallback(async () => {
+    await attachClipboardContext(true).catch(() => {});
     if (mode !== "expanded") {
       await invoke("set_window_mode", { mode: "expanded" }).catch(() => {});
       setMode("expanded");
     }
-    await attachClipboardContext().catch(() => {});
   }, [mode, attachClipboardContext]);
 
   useEffect(() => {
@@ -154,6 +157,8 @@ export default function App() {
         onStop={handleStop}
         onSendText={sendTextMessage}
         onAskClaude={askClaude}
+        onRunAction={runAction}
+        onApplyAction={applyAction}
         onAttachClipboard={attachClipboardContext}
         onSearch={searchWeb}
       />

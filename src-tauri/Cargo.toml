@@ -26,6 +26,7 @@ image = "0.25"
 uuid = { version = "1", features = ["v4"] }
 arboard = "3"
 chrono = "0.4"
+axum = "0.8.9"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winuser"] }

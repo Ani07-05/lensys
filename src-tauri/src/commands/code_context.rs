@@ -78,14 +78,40 @@ pub async fn get_clipboard_code_context() -> Result<CodeContext, String> {
 
     let language = detect_language_from_content(&text).map(String::from);
     let symbols = extract_symbols(&text, language.as_deref().unwrap_or(""));
+    let (window_title, active_app) = tokio::task::spawn_blocking(get_foreground_window_info)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut file_path = None;
+    let mut file_name = Some("selection".to_string());
+    let mut resolved_language = language;
+
+    if is_ide_window(&active_app, &window_title) {
+        if let Some((filename, workspace)) = parse_vscode_title(&window_title) {
+            file_name = Some(filename.clone());
+            if resolved_language.is_none() {
+                resolved_language = detect_language(&filename).map(String::from);
+            }
+            if let Ok(path) = find_file_on_disk(&filename, workspace.as_deref()).await {
+                file_path = Some(path.to_string_lossy().to_string());
+            }
+        }
+    }
 
     Ok(CodeContext {
-        file_path: None,
-        file_name: Some("clipboard".to_string()),
-        language,
+        file_path,
+        file_name,
+        language: resolved_language,
         content: Some(truncate_content(&text, 200)),
-        window_title: "Clipboard".to_string(),
-        active_app: "clipboard".to_string(),
+        window_title: if window_title.is_empty() {
+            "Clipboard".to_string()
+        } else {
+            window_title
+        },
+        active_app: if active_app.is_empty() {
+            "clipboard".to_string()
+        } else {
+            active_app
+        },
         is_ide: true,
         symbols,
     })
