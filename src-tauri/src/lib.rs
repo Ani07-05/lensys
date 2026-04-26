@@ -1,4 +1,5 @@
 mod commands;
+mod api;
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -22,7 +23,9 @@ pub struct AppState {
     pub last_analysis_time: Mutex<std::time::Instant>,
     // Code context cache
     pub last_code_context: Mutex<Option<commands::CodeContext>>,
+    pub transcript: Mutex<Vec<api::TranscriptEntry>>,
     pub cursor_pos: Mutex<(i32, i32)>,
+    pub workspace_path: std::path::PathBuf,
 }
 
 #[derive(serde::Serialize)]
@@ -42,6 +45,16 @@ pub struct EnvKeys {
 
 fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn workspace_root() -> std::path::PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let root = if cwd.file_name().and_then(|name| name.to_str()) == Some("src-tauri") {
+        cwd.parent().unwrap_or(cwd.as_path()).to_path_buf()
+    } else {
+        cwd
+    };
+    root.canonicalize().unwrap_or(root)
 }
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
@@ -108,6 +121,21 @@ async fn get_clipboard_context(
     Ok(ctx)
 }
 
+/// Copies the active selection first, then reads it from the clipboard.
+#[tauri::command]
+async fn capture_selection_context(
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+) -> Result<commands::CodeContext, String> {
+    copy_selection_to_clipboard_native();
+    let ctx = read_clipboard_context_with_retry().await?;
+
+    *lock_or_recover(&state.last_code_context) = Some(ctx.clone());
+    let _ = window.emit("cluddy:code_context", &ctx);
+
+    Ok(ctx)
+}
+
 /// Text-mode: ask Claude directly about the current code context.
 #[tauri::command]
 async fn ask_claude(question: String, state: State<'_, Arc<AppState>>) -> Result<String, String> {
@@ -116,6 +144,27 @@ async fn ask_claude(question: String, state: State<'_, Arc<AppState>>) -> Result
         .clone()
         .unwrap_or_default();
     claude.explain_code(&ctx, &question).await
+}
+
+/// Agentic text-mode: infer or generate a concrete edit for the current context.
+#[tauri::command]
+async fn propose_code_action(
+    instruction: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<commands::CodeActionProposal, String> {
+    let claude = commands::ClaudeClient::new(state.http_client.clone(), state.groq_api_key.clone());
+    let ctx = lock_or_recover(&state.last_code_context)
+        .clone()
+        .unwrap_or_default();
+    claude.propose_code_action(&ctx, &instruction).await
+}
+
+/// Applies a previously generated code action after validating the target path and old text.
+#[tauri::command]
+async fn apply_code_action(
+    request: commands::ApplyCodeActionRequest,
+) -> Result<commands::ApplyCodeActionResult, String> {
+    commands::apply_code_action(request).await
 }
 
 /// Web search via Tavily.
@@ -296,17 +345,19 @@ async fn set_window_mode(
     match mode.as_str() {
         "expanded" => {
             state.is_expanded.store(true, Ordering::Relaxed);
+            let width = 380;
+            let height = 240;
             window
                 .set_size(tauri::Size::Physical(tauri::PhysicalSize {
-                    width: 420,
-                    height: 560,
+                    width,
+                    height,
                 }))
                 .map_err(|e| e.to_string())?;
             window.set_resizable(false).ok();
             if let Ok(Some(monitor)) = window.current_monitor() {
                 let screen = monitor.size();
-                let x = (screen.width as i32 / 2) - 210;
-                let y = (screen.height as i32 / 2) - 280;
+                let x = screen.width as i32 - width as i32 - 24;
+                let y = 86;
                 window
                     .set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }))
                     .ok();
@@ -314,18 +365,39 @@ async fn set_window_mode(
             window.show().ok();
             window.set_focus().ok();
         }
+        "calling" => {
+            state.is_expanded.store(false, Ordering::Relaxed);
+            window
+                .set_size(tauri::Size::Physical(tauri::PhysicalSize {
+                    width: 340,
+                    height: 118,
+                }))
+                .map_err(|e| e.to_string())?;
+            window.set_resizable(false).ok();
+        }
         _ => {
             state.is_expanded.store(false, Ordering::Relaxed);
             window
                 .set_size(tauri::Size::Physical(tauri::PhysicalSize {
-                    width: 280,
-                    height: 44,
+                    width: 96,
+                    height: 76,
                 }))
                 .map_err(|e| e.to_string())?;
             window.set_resizable(false).ok();
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn resize_panel(height: u32, window: tauri::WebviewWindow) -> Result<(), String> {
+    let height = height.clamp(168, 460);
+    window
+        .set_size(tauri::Size::Physical(tauri::PhysicalSize {
+            width: 380,
+            height,
+        }))
+        .map_err(|e| e.to_string())
 }
 
 // ── Platform helpers ──────────────────────────────────────────────────────────
@@ -342,10 +414,14 @@ fn get_cursor_pos_native() -> (i32, i32) {
 }
 
 #[cfg(target_os = "windows")]
-fn copy_selection_to_clipboard_native() {
+pub(crate) fn copy_selection_to_clipboard_native() {
     use winapi::um::winuser::{keybd_event, KEYEVENTF_KEYUP, VK_CONTROL};
 
     const C_KEY: u8 = b'C';
+
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        let _ = clipboard.set_text("");
+    }
 
     unsafe {
         keybd_event(VK_CONTROL as u8, 0, 0, 0);
@@ -361,7 +437,23 @@ fn get_cursor_pos_native() -> (i32, i32) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn copy_selection_to_clipboard_native() {}
+pub(crate) fn copy_selection_to_clipboard_native() {}
+
+async fn read_clipboard_context_with_retry() -> Result<commands::CodeContext, String> {
+    let mut last_error = "Clipboard is empty".to_string();
+
+    for delay_ms in [80_u64, 140, 220, 320, 480, 650] {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        match commands::get_clipboard_code_context().await {
+            Ok(ctx) => return Ok(ctx),
+            Err(err) => last_error = err,
+        }
+    }
+
+    Err(format!(
+        "{last_error}. Select text in the editor, then press Ctrl+Shift+T without focusing Cluddy first."
+    ))
+}
 
 // ── App entry point ───────────────────────────────────────────────────────────
 
@@ -393,7 +485,9 @@ pub fn run() {
         last_analysis: Mutex::new(String::new()),
         last_analysis_time: Mutex::new(std::time::Instant::now()),
         last_code_context: Mutex::new(None),
+            transcript: Mutex::new(Vec::new()),
         cursor_pos: Mutex::new((0, 0)),
+            workspace_path: workspace_root(),
     });
 
     tauri::Builder::default()
@@ -412,6 +506,13 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let wiki = commands::WikiManager::new(wiki_init_path);
                 let _ = wiki.ensure_initialized().await;
+            });
+
+            let api_state = Arc::clone(&state);
+            tauri::async_runtime::spawn(async move {
+                if let Err(err) = api::serve(api_state).await {
+                    eprintln!("Cluddy API failed: {err}");
+                }
             });
 
             // Cursor-following thread
@@ -464,13 +565,16 @@ pub fn run() {
             app.global_shortcut()
                 .on_shortcut("Ctrl+Shift+T", move |_app, _shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
-                        let win_t = win_t.clone();
-                        std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(120));
-                            copy_selection_to_clipboard_native();
-                            std::thread::sleep(std::time::Duration::from_millis(90));
-                            win_t.emit("cluddy:text_mode", ()).ok();
-                        });
+                        win_t.emit("cluddy:text_mode", ()).ok();
+                    }
+                })?;
+
+            // Ctrl+Shift+B — cycle the visible buddy
+            let win_b = win.clone();
+            app.global_shortcut()
+                .on_shortcut("Ctrl+Shift+B", move |_app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        win_b.emit("cluddy:buddy", ()).ok();
                     }
                 })?;
 
@@ -480,7 +584,10 @@ pub fn run() {
             get_env_keys,
             get_code_context,
             get_clipboard_context,
+            capture_selection_context,
             ask_claude,
+            propose_code_action,
+            apply_code_action,
             web_search,
             wiki_read,
             wiki_write,
@@ -490,6 +597,7 @@ pub fn run() {
             capture_and_analyze,
             get_memories,
             set_window_mode,
+            resize_panel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Cluddy");

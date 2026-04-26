@@ -40,7 +40,9 @@ interface UseVapiReturn {
   stopCall: () => void;
   sendTextMessage: (text: string) => void;
   askClaude: (question: string) => Promise<string>;
-  attachClipboardContext: () => Promise<CodeContext>;
+  runAction: (instruction: string) => Promise<CodeActionProposal>;
+  applyAction: (proposal: CodeActionProposal) => Promise<ApplyCodeActionResult>;
+  attachClipboardContext: (captureSelection?: boolean) => Promise<CodeContext>;
   searchWeb: (query: string) => Promise<SearchResult[]>;
   error: string | null;
 }
@@ -49,6 +51,22 @@ export interface SearchResult {
   title: string;
   url: string;
   content: string;
+}
+
+export interface CodeActionProposal {
+  summary: string;
+  confidence: number;
+  target_file: string | null;
+  old_text: string;
+  replacement: string;
+  needs_confirmation: boolean;
+  risk_notes: string[];
+}
+
+export interface ApplyCodeActionResult {
+  target_file: string;
+  changed: boolean;
+  message: string;
 }
 
 const CAPTURE_INTERVAL_MS = 3000;
@@ -132,8 +150,9 @@ export function useVapi(): UseVapiReturn {
     sendVapiMessage("user", trimmed);
   }, [appendTranscript, sendVapiMessage]);
 
-  const attachClipboardContext = useCallback(async (): Promise<CodeContext> => {
-    const ctx = await invoke<CodeContext>("get_clipboard_context");
+  const attachClipboardContext = useCallback(async (captureSelection = false): Promise<CodeContext> => {
+    const command = captureSelection ? "capture_selection_context" : "get_clipboard_context";
+    const ctx = await invoke<CodeContext>(command);
     latestCtxRef.current = ctx;
     setCodeContext(ctx);
 
@@ -164,6 +183,45 @@ export function useVapi(): UseVapiReturn {
     const reply = await invoke<string>("ask_claude", { question: trimmed });
     appendTranscript("Cluddy", reply);
     return reply;
+  }, [appendTranscript]);
+
+  const runAction = useCallback(async (instruction: string): Promise<CodeActionProposal> => {
+    const trimmed = instruction.trim();
+    setError(null);
+
+    if (!latestCtxRef.current?.content) {
+      await invoke<CodeContext>("get_code_context")
+        .then((ctx) => {
+          latestCtxRef.current = ctx;
+          setCodeContext(ctx);
+        })
+        .catch(() => {});
+    }
+
+    appendTranscript("You", trimmed || "Infer the best edit for the selection.");
+    const proposal = await invoke<CodeActionProposal>("propose_code_action", {
+      instruction: trimmed,
+    });
+    appendTranscript("Cluddy", proposal.summary);
+    return proposal;
+  }, [appendTranscript]);
+
+  const applyAction = useCallback(async (
+    proposal: CodeActionProposal,
+  ): Promise<ApplyCodeActionResult> => {
+    if (!proposal.target_file) {
+      throw new Error("This action has no target file");
+    }
+
+    const result = await invoke<ApplyCodeActionResult>("apply_code_action", {
+      request: {
+        target_file: proposal.target_file,
+        old_text: proposal.old_text,
+        replacement: proposal.replacement,
+      },
+    });
+    appendTranscript("Cluddy", result.message);
+    return result;
   }, [appendTranscript]);
 
   const searchWeb = useCallback(async (query: string): Promise<SearchResult[]> => {
@@ -367,6 +425,8 @@ export function useVapi(): UseVapiReturn {
     stopCall,
     sendTextMessage,
     askClaude,
+    runAction,
+    applyAction,
     attachClipboardContext,
     searchWeb,
     error,
