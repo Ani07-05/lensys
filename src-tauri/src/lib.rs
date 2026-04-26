@@ -345,21 +345,22 @@ async fn set_window_mode(
     match mode.as_str() {
         "expanded" => {
             state.is_expanded.store(true, Ordering::Relaxed);
-            let width = 380;
-            let height = 240;
+            let width = 380.0f64;
+            let height = 240.0f64;
             window
-                .set_size(tauri::Size::Physical(tauri::PhysicalSize {
-                    width,
-                    height,
-                }))
+                .set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }))
                 .map_err(|e| e.to_string())?;
             window.set_resizable(false).ok();
             if let Ok(Some(monitor)) = window.current_monitor() {
-                let screen = monitor.size();
-                let x = screen.width as i32 - width as i32 - 24;
-                let y = 86;
+                // Derive logical screen width from physical size ÷ scale factor.
+                let scale = monitor.scale_factor();
+                let phys = monitor.size();
+                let screen_w = phys.width as f64 / scale;
+                let x = screen_w - width - 12.0;
+                // 40 logical px clears the menu bar on both standard and notch Macs.
+                let y = 40.0f64;
                 window
-                    .set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }))
+                    .set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
                     .ok();
             }
             window.show().ok();
@@ -368,9 +369,9 @@ async fn set_window_mode(
         "calling" => {
             state.is_expanded.store(false, Ordering::Relaxed);
             window
-                .set_size(tauri::Size::Physical(tauri::PhysicalSize {
-                    width: 340,
-                    height: 118,
+                .set_size(tauri::Size::Logical(tauri::LogicalSize {
+                    width: 340.0,
+                    height: 118.0,
                 }))
                 .map_err(|e| e.to_string())?;
             window.set_resizable(false).ok();
@@ -378,9 +379,9 @@ async fn set_window_mode(
         _ => {
             state.is_expanded.store(false, Ordering::Relaxed);
             window
-                .set_size(tauri::Size::Physical(tauri::PhysicalSize {
-                    width: 96,
-                    height: 76,
+                .set_size(tauri::Size::Logical(tauri::LogicalSize {
+                    width: 96.0,
+                    height: 76.0,
                 }))
                 .map_err(|e| e.to_string())?;
             window.set_resizable(false).ok();
@@ -391,10 +392,11 @@ async fn set_window_mode(
 
 #[tauri::command]
 async fn resize_panel(height: u32, window: tauri::WebviewWindow) -> Result<(), String> {
-    let height = height.clamp(168, 460);
+    // height comes from scrollHeight (logical CSS px) — use Logical to match.
+    let height = (height as f64).clamp(168.0, 460.0);
     window
-        .set_size(tauri::Size::Physical(tauri::PhysicalSize {
-            width: 380,
+        .set_size(tauri::Size::Logical(tauri::LogicalSize {
+            width: 380.0,
             height,
         }))
         .map_err(|e| e.to_string())
@@ -431,12 +433,74 @@ pub(crate) fn copy_selection_to_clipboard_native() {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn get_cursor_pos_native() -> (i32, i32) {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct CGPoint { x: f64, y: f64 }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreate(source: *const c_void) -> *const c_void;
+        fn CGEventGetLocation(event: *const c_void) -> CGPoint;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRelease(cf: *const c_void);
+    }
+
+    unsafe {
+        let ev = CGEventCreate(std::ptr::null());
+        if ev.is_null() { return (0, 0); }
+        let pt = CGEventGetLocation(ev);
+        CFRelease(ev);
+        (pt.x as i32, pt.y as i32)
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn copy_selection_to_clipboard_native() {
+    use std::ffi::c_void;
+
+    // Use CGEvent directly — more reliable than enigo for a one-shot Cmd+C.
+    // kCGEventSourceStateHIDSystemState = 1, kCGHIDEventTap = 0
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreateKeyboardEvent(
+            source: *const c_void,
+            virtual_key: u16,
+            key_down: bool,
+        ) -> *const c_void;
+        fn CGEventSetFlags(event: *const c_void, flags: u64);
+        fn CGEventPost(tap: u32, event: *const c_void);
+        fn CFRelease(cf: *const c_void);
+    }
+
+    unsafe {
+        // Virtual key 8 = 'c', kCGEventFlagMaskCommand = 1 << 20
+        const C_KEY: u16 = 8;
+        const CMD_FLAG: u64 = 1 << 20;
+        const HID_TAP: u32 = 0;
+
+        let down = CGEventCreateKeyboardEvent(std::ptr::null(), C_KEY, true);
+        CGEventSetFlags(down, CMD_FLAG);
+        CGEventPost(HID_TAP, down);
+        CFRelease(down);
+
+        let up = CGEventCreateKeyboardEvent(std::ptr::null(), C_KEY, false);
+        CGEventSetFlags(up, CMD_FLAG);
+        CGEventPost(HID_TAP, up);
+        CFRelease(up);
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn get_cursor_pos_native() -> (i32, i32) {
     (100, 100)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub(crate) fn copy_selection_to_clipboard_native() {}
 
 async fn read_clipboard_context_with_retry() -> Result<commands::CodeContext, String> {
@@ -450,9 +514,129 @@ async fn read_clipboard_context_with_retry() -> Result<commands::CodeContext, St
         }
     }
 
-    Err(format!(
-        "{last_error}. Select text in the editor, then press Ctrl+Shift+T without focusing Cluddy first."
-    ))
+    #[cfg(target_os = "macos")]
+    let hint = "Select text in your editor, then press Cmd+Shift+T. \
+                If it keeps failing, grant Accessibility in System Settings → Privacy.";
+    #[cfg(not(target_os = "macos"))]
+    let hint = "Select text in the editor, then press Ctrl+Shift+T without focusing Cluddy first.";
+
+    Err(format!("{last_error}. {hint}"))
+}
+
+// ── macOS permission requests ─────────────────────────────────────────────────
+
+#[cfg(target_os = "macos")]
+mod macos_permissions {
+    use std::ffi::{c_char, c_void};
+
+    type CFTypeRef = *const c_void;
+    type CFDictionaryRef = *const c_void;
+    type CFAllocatorRef = *const c_void;
+    type CFStringRef = *const c_void;
+    type CFIndex = isize;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFBooleanTrue: CFTypeRef;
+        // Declared as u8 so we can safely take their address without dereferencing.
+        static kCFTypeDictionaryKeyCallBacks: u8;
+        static kCFTypeDictionaryValueCallBacks: u8;
+        fn CFStringCreateWithCString(
+            alloc: CFAllocatorRef,
+            c_str: *const c_char,
+            encoding: u32,
+        ) -> CFStringRef;
+        fn CFDictionaryCreate(
+            allocator: CFAllocatorRef,
+            keys: *const CFTypeRef,
+            values: *const CFTypeRef,
+            num_values: CFIndex,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> CFDictionaryRef;
+        fn CFRelease(cf: CFTypeRef);
+    }
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+        fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRequestScreenCaptureAccess() -> bool;
+    }
+
+    /// Triggers the macOS system dialogs for Screen Recording and Accessibility.
+    /// Both dialogs are only shown if the permission is not already granted.
+    pub fn request() {
+        unsafe {
+            // ── Screen Recording ──────────────────────────────────────────────
+            if !CGPreflightScreenCaptureAccess() {
+                // Opens System Settings > Privacy > Screen Recording on first run.
+                CGRequestScreenCaptureAccess();
+            }
+
+            // ── Accessibility ─────────────────────────────────────────────────
+            if !AXIsProcessTrusted() {
+                // AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: true})
+                // shows the system Accessibility permission dialog.
+                const UTF8: u32 = 0x08000100;
+                let key_cstr = b"AXTrustedCheckOptionPrompt\0";
+                let key = CFStringCreateWithCString(
+                    std::ptr::null(),
+                    key_cstr.as_ptr() as *const c_char,
+                    UTF8,
+                );
+                let keys: [CFTypeRef; 1] = [key];
+                let vals: [CFTypeRef; 1] = [kCFBooleanTrue];
+                let dict = CFDictionaryCreate(
+                    std::ptr::null(),
+                    keys.as_ptr(),
+                    vals.as_ptr(),
+                    1,
+                    &kCFTypeDictionaryKeyCallBacks as *const u8 as *const c_void,
+                    &kCFTypeDictionaryValueCallBacks as *const u8 as *const c_void,
+                );
+                AXIsProcessTrustedWithOptions(dict);
+                CFRelease(dict);
+                CFRelease(key);
+            }
+        }
+    }
+}
+
+// ── macOS full-screen overlay ─────────────────────────────────────────────────
+
+/// Sets NSWindowCollectionBehavior so the floating window appears on top of
+/// full-screen spaces, not just normal desktops.
+#[cfg(target_os = "macos")]
+fn setup_window_for_fullscreen(win: &tauri::WebviewWindow) {
+    use std::ffi::{c_char, c_void};
+
+    // Alias objc_msgSend with the exact signature we need to avoid variadic UB.
+    #[link(name = "objc", kind = "dylib")]
+    extern "C" {
+        #[link_name = "objc_msgSend"]
+        fn msg_send_u64(recv: *mut c_void, sel: *const c_void, val: u64);
+    }
+
+    #[link(name = "Foundation", kind = "framework")]
+    extern "C" {
+        fn sel_registerName(name: *const c_char) -> *const c_void;
+    }
+
+    if let Ok(ns_window) = win.ns_window() {
+        unsafe {
+            let sel = sel_registerName(b"setCollectionBehavior:\0".as_ptr() as *const c_char);
+            // NSWindowCollectionBehaviorCanJoinAllSpaces    = 1 << 0 = 1
+            // NSWindowCollectionBehaviorFullScreenAuxiliary = 1 << 8 = 256
+            let behavior: u64 = (1 << 0) | (1 << 8);
+            msg_send_u64(ns_window as *mut c_void, sel, behavior);
+        }
+    }
 }
 
 // ── App entry point ───────────────────────────────────────────────────────────
@@ -496,10 +680,18 @@ pub fn run() {
         .setup(|app| {
             use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
+            // Ask for Screen Recording and Accessibility on macOS.
+            #[cfg(target_os = "macos")]
+            macos_permissions::request();
+
             let state: Arc<AppState> = app.state::<Arc<AppState>>().inner().clone();
             let win = app
                 .get_webview_window("main")
                 .expect("main window not found");
+
+            // Allow the window to overlay full-screen spaces on macOS.
+            #[cfg(target_os = "macos")]
+            setup_window_for_fullscreen(&win);
 
             // Initialize wiki directory once Tauri's async runtime is available.
             let wiki_init_path = state.wiki_path.clone();
@@ -528,10 +720,10 @@ pub fn run() {
                         let dx = (cx - last_x).abs();
                         let dy = (cy - last_y).abs();
                         if dx > 4 || dy > 4 {
-                            let _ = win_tracker.set_position(tauri::Position::Physical(
-                                tauri::PhysicalPosition {
-                                    x: cx + 16,
-                                    y: cy - 52,
+                            let _ = win_tracker.set_position(tauri::Position::Logical(
+                                tauri::LogicalPosition {
+                                    x: cx as f64 + 20.0,
+                                    y: cy as f64 + 20.0,
                                 },
                             ));
                             last_x = cx;
@@ -542,37 +734,43 @@ pub fn run() {
                 }
             });
 
-            // Ctrl+Shift+A — start/stop call
+            // Use Cmd on macOS, Ctrl on Windows/Linux
+            #[cfg(target_os = "macos")]
+            let (mod_a, mod_s, mod_t, mod_b) = ("Super+Shift+A", "Super+Shift+S", "Super+Shift+T", "Super+Shift+B");
+            #[cfg(not(target_os = "macos"))]
+            let (mod_a, mod_s, mod_t, mod_b) = ("Ctrl+Shift+A", "Ctrl+Shift+S", "Ctrl+Shift+T", "Ctrl+Shift+B");
+
+            // Cmd/Ctrl+Shift+A — start/stop call
             let win_a = win.clone();
             app.global_shortcut()
-                .on_shortcut("Ctrl+Shift+A", move |_app, _shortcut, event| {
+                .on_shortcut(mod_a, move |_app, _shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
                         win_a.emit("cluddy:hotkey", ()).ok();
                     }
                 })?;
 
-            // Ctrl+Shift+S — toggle panel
+            // Cmd/Ctrl+Shift+S — toggle panel
             let win_s = win.clone();
             app.global_shortcut()
-                .on_shortcut("Ctrl+Shift+S", move |_app, _shortcut, event| {
+                .on_shortcut(mod_s, move |_app, _shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
                         win_s.emit("cluddy:panel", ()).ok();
                     }
                 })?;
 
-            // Ctrl+Shift+T — toggle text input mode
+            // Cmd/Ctrl+Shift+T — toggle text input mode
             let win_t = win.clone();
             app.global_shortcut()
-                .on_shortcut("Ctrl+Shift+T", move |_app, _shortcut, event| {
+                .on_shortcut(mod_t, move |_app, _shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
                         win_t.emit("cluddy:text_mode", ()).ok();
                     }
                 })?;
 
-            // Ctrl+Shift+B — cycle the visible buddy
+            // Cmd/Ctrl+Shift+B — cycle the visible buddy
             let win_b = win.clone();
             app.global_shortcut()
-                .on_shortcut("Ctrl+Shift+B", move |_app, _shortcut, event| {
+                .on_shortcut(mod_b, move |_app, _shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
                         win_b.emit("cluddy:buddy", ()).ok();
                     }

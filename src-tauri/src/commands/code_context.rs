@@ -118,6 +118,19 @@ pub async fn get_clipboard_code_context() -> Result<CodeContext, String> {
 }
 
 fn read_clipboard() -> Result<String, String> {
+    // On macOS, pbpaste is the most reliable path — no thread/autorelease-pool
+    // issues, no permissions required, always works.
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("pbpaste").output() {
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            if !text.is_empty() {
+                return Ok(text);
+            }
+        }
+    }
+
+    // Fallback: arboard (Windows / Linux, or macOS pbpaste returned empty)
     arboard::Clipboard::new()
         .map_err(|e| e.to_string())?
         .get_text()

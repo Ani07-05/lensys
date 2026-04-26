@@ -31,6 +31,13 @@ type BuddyFrames = Record<OrbMode, string[]>;
 
 const BUDDY_STORAGE_KEY = "lensys:selected-buddy";
 
+/** Returns only the sentence currently being streamed (the last incomplete chunk). */
+function lastSentence(text: string): string {
+  if (!text.trim()) return "";
+  const parts = text.split(/(?<=[.!?…])\s+/);
+  return parts[parts.length - 1].trim();
+}
+
 function getMode(callStatus: VapiStatus | undefined): OrbMode {
   if (callStatus === "error") return "alert";
   if (callStatus === "connecting") return "connecting";
@@ -148,7 +155,7 @@ export default function Orb({
   const isSpeech = mode === "speech";
   const isPhrases = mode === "phrases";
   const bubble = isSpeech && displayText
-    ? displayText
+    ? lastSentence(displayText)
     : mode === "connecting"
       ? "connecting..."
       : mode === "ready"
@@ -160,8 +167,8 @@ export default function Orb({
         : "";
   const buddy = BUDDIES[selectedBuddy];
   const frame = buddy.frames[mode][frameIdx] ?? buddy.frames.idle[0];
-  const clippedBubble = bubble.length > (compact ? 180 : 140)
-    ? `${bubble.slice(0, compact ? 176 : 136)}...`
+  const clippedBubble = bubble.length > 200
+    ? `${bubble.slice(0, 196)}...`
     : bubble;
 
   return (

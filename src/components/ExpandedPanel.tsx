@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   ApplyCodeActionResult,
@@ -56,8 +56,14 @@ function selectedLines(ctx: CodeContext | null) {
   return ctx?.content ? ctx.content.split("\n").length : 0;
 }
 
+function lastSentence(text: string): string {
+  if (!text.trim()) return "";
+  const parts = text.split(/(?<=[.!?…])\s+/);
+  return parts[parts.length - 1].trim();
+}
+
 function latestAssistantOutput(transcript: string, currentSpeech: string) {
-  if (currentSpeech.trim()) return currentSpeech.trim();
+  if (currentSpeech.trim()) return lastSentence(currentSpeech);
 
   const messages = transcript.split("\n").reduce<string[]>((items, line) => {
     if (line.startsWith("Cluddy:")) {
@@ -163,10 +169,28 @@ export default function ExpandedPanel({
     return () => window.removeEventListener("keydown", handler);
   }, [onStop]);
 
-  useLayoutEffect(() => {
-    const height = Math.ceil((rootRef.current?.scrollHeight ?? 220) + 4);
-    invoke("resize_panel", { height }).catch(() => {});
-  }, [mode, output, localOutput, searchResults.length, busy, error, contextSummary, text]);
+  // Continuously sync window height to content height via ResizeObserver.
+  // This handles all cases (streaming text, layout shifts, mode changes) without
+  // a fragile dependency array and without racing against async IPC calls.
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    let raf: number;
+    const flush = () => {
+      const h = Math.ceil(el.scrollHeight) + 4;
+      invoke("resize_panel", { height: h }).catch(() => {});
+    };
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(flush);
+    });
+    ro.observe(el);
+    flush(); // Sync on mount before first observation fires
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(raf);
+    };
+  }, []);
 
   const recapture = async () => {
     setBusy(true);
@@ -238,9 +262,10 @@ export default function ExpandedPanel({
           <button
             onClick={() => void recapture()}
             disabled={busy}
+            title="Re-read clipboard (or press Cmd+Shift+T to auto-copy your selection)"
             className="text-[9px] px-2 py-1 rounded-lg text-amber-100/70 bg-amber-300/[0.09] disabled:opacity-40"
           >
-            capture
+            {codeContext?.content ? "recapture" : "capture"}
           </button>
           <button
             onClick={onStop}
@@ -250,6 +275,31 @@ export default function ExpandedPanel({
           </button>
         </div>
       </header>
+
+      {/* Context preview — shows what Cmd+Shift+T captured */}
+      {codeContext?.content && (
+        <section className="rounded-2xl panel-card overflow-hidden">
+          <div className="flex items-center gap-2 px-3 pt-2 pb-1">
+            {codeContext.language && (
+              <span className="text-[8px] uppercase tracking-wider text-cyan-300/50 shrink-0">
+                {codeContext.language}
+              </span>
+            )}
+            <span className="text-[9px] text-white/50 truncate flex-1">
+              {codeContext.file_name ?? "clipboard"}
+            </span>
+            <span className="text-[8px] text-white/20 shrink-0">
+              {codeContext.content.split("\n").length} lines
+            </span>
+          </div>
+          <pre
+            className="px-3 pb-2 text-white/40 overflow-hidden"
+            style={{ fontSize: 9, lineHeight: "14px", maxHeight: 70, fontFamily: "monospace" }}
+          >
+            {codeContext.content.split("\n").slice(0, 5).join("\n")}
+          </pre>
+        </section>
+      )}
 
       <OutputOnly
         output={output}
