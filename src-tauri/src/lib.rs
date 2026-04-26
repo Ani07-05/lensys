@@ -720,10 +720,19 @@ pub fn run() {
                         let dx = (cx - last_x).abs();
                         let dy = (cy - last_y).abs();
                         if dx > 4 || dy > 4 {
+                            // GetCursorPos on Windows returns physical pixels; CGEventGetLocation
+                            // on macOS returns logical points. Convert to logical before adding
+                            // the constant 20 logical-px offset so the distance is always the
+                            // same regardless of DPI scaling.
+                            let scale = win_tracker.scale_factor().unwrap_or(1.0);
+                            #[cfg(target_os = "windows")]
+                            let (lx, ly) = (cx as f64 / scale, cy as f64 / scale);
+                            #[cfg(not(target_os = "windows"))]
+                            let (lx, ly) = (cx as f64, cy as f64);
                             let _ = win_tracker.set_position(tauri::Position::Logical(
                                 tauri::LogicalPosition {
-                                    x: cx as f64 + 20.0,
-                                    y: cy as f64 + 20.0,
+                                    x: lx + 20.0,
+                                    y: ly + 20.0,
                                 },
                             ));
                             last_x = cx;

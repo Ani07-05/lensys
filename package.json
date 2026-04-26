@@ -4,10 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
+    "dev": "vite --mode ${APP_ENV:-development}",
+    "build": "tsc && vite build --mode production",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:dev": "APP_ENV=development tauri dev",
+    "tauri:prod": "APP_ENV=production tauri dev"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
