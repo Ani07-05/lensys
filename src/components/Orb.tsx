@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { VapiStatus } from "../hooks/useVapi";
 
 const PHRASES = [
@@ -25,17 +25,19 @@ interface OrbProps {
   showBubble?: boolean;
 }
 
-type OrbMode = "idle" | "phrases" | "speech" | "alert";
-type BuddyId = "mouse" | "mint" | "ember";
+type OrbMode = "idle" | "connecting" | "ready" | "phrases" | "speech" | "alert";
+type BuddyId = "mouse" | "fox" | "frog";
 type BuddyFrames = Record<OrbMode, string[]>;
 
 const BUDDY_STORAGE_KEY = "lensys:selected-buddy";
 
 function getMode(callStatus: VapiStatus | undefined): OrbMode {
   if (callStatus === "error") return "alert";
-  if (!callStatus || callStatus === "idle" || callStatus === "connecting") return "idle";
+  if (callStatus === "connecting") return "connecting";
+  if (callStatus === "connected") return "ready";
   if (callStatus === "speaking") return "speech";
-  return "phrases";
+  if (callStatus === "listening") return "phrases";
+  return "idle";
 }
 
 const BUDDIES: Record<BuddyId, { name: string; frames: BuddyFrames }> = {
@@ -43,27 +45,33 @@ const BUDDIES: Record<BuddyId, { name: string; frames: BuddyFrames }> = {
     name: "mouse",
     frames: {
       idle: ["/buddies/mouse-idle.png", "/buddies/mouse-listen.png"],
+      connecting: ["/buddies/mouse-alert.png", "/buddies/mouse-listen.png"],
+      ready: ["/buddies/mouse-listen.png", "/buddies/mouse-idle.png"],
       phrases: ["/buddies/mouse-listen.png", "/buddies/mouse-idle.png"],
       speech: ["/buddies/mouse-talk.png", "/buddies/mouse-idle.png"],
       alert: ["/buddies/mouse-alert.png", "/buddies/mouse-idle.png"],
     },
   },
-  mint: {
-    name: "mint",
+  fox: {
+    name: "fox",
     frames: {
-      idle: ["/buddies/mint-idle.png", "/buddies/mint-listen.png"],
-      phrases: ["/buddies/mint-listen.png", "/buddies/mint-idle.png"],
-      speech: ["/buddies/mint-talk.png", "/buddies/mint-idle.png"],
-      alert: ["/buddies/mint-alert.png", "/buddies/mint-idle.png"],
+      idle: ["/buddies/fox-idle.png", "/buddies/fox-listen.png"],
+      connecting: ["/buddies/fox-alert.png", "/buddies/fox-listen.png"],
+      ready: ["/buddies/fox-listen.png", "/buddies/fox-idle.png"],
+      phrases: ["/buddies/fox-listen.png", "/buddies/fox-idle.png"],
+      speech: ["/buddies/fox-talk.png", "/buddies/fox-idle.png"],
+      alert: ["/buddies/fox-alert.png", "/buddies/fox-idle.png"],
     },
   },
-  ember: {
-    name: "ember",
+  frog: {
+    name: "frog",
     frames: {
-      idle: ["/buddies/ember-idle.png", "/buddies/ember-listen.png"],
-      phrases: ["/buddies/ember-listen.png", "/buddies/ember-idle.png"],
-      speech: ["/buddies/ember-talk.png", "/buddies/ember-idle.png"],
-      alert: ["/buddies/ember-alert.png", "/buddies/ember-idle.png"],
+      idle: ["/buddies/frog-idle.png", "/buddies/frog-listen.png"],
+      connecting: ["/buddies/frog-alert.png", "/buddies/frog-listen.png"],
+      ready: ["/buddies/frog-listen.png", "/buddies/frog-idle.png"],
+      phrases: ["/buddies/frog-listen.png", "/buddies/frog-idle.png"],
+      speech: ["/buddies/frog-talk.png", "/buddies/frog-idle.png"],
+      alert: ["/buddies/frog-alert.png", "/buddies/frog-idle.png"],
     },
   },
 };
@@ -89,13 +97,13 @@ export default function Orb({
   const [frameIdx, setFrameIdx] = useState(0);
   const [selectedBuddy, setSelectedBuddy] = useState<BuddyId>(getSavedBuddy);
 
-  const cycleBuddy = () => {
+  const cycleBuddy = useCallback(() => {
     setSelectedBuddy((current) => {
       const next = BUDDY_IDS[(BUDDY_IDS.indexOf(current) + 1) % BUDDY_IDS.length];
       window.localStorage.setItem(BUDDY_STORAGE_KEY, next);
       return next;
     });
-  };
+  }, []);
 
   useEffect(() => {
     if (mode !== "phrases") return;
@@ -115,7 +123,7 @@ export default function Orb({
 
   useEffect(() => {
     setFrameIdx(0);
-    const interval = mode === "speech" ? 260 : mode === "phrases" ? 520 : 760;
+    const interval = mode === "speech" ? 260 : mode === "connecting" ? 360 : mode === "phrases" ? 520 : 760;
     const t = setInterval(() => {
       setFrameIdx((i) => (i + 1) % BUDDIES[selectedBuddy].frames[mode].length);
     }, interval);
@@ -130,13 +138,21 @@ export default function Orb({
       cycleBuddy();
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+    window.addEventListener("lensys:cycle-buddy", cycleBuddy);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("lensys:cycle-buddy", cycleBuddy);
+    };
+  }, [cycleBuddy]);
 
   const isSpeech = mode === "speech";
   const isPhrases = mode === "phrases";
   const bubble = isSpeech && displayText
     ? displayText
+    : mode === "connecting"
+      ? "connecting..."
+      : mode === "ready"
+        ? "connected. listening."
     : isPhrases
       ? PHRASES[phraseIdx]
       : mode === "alert"

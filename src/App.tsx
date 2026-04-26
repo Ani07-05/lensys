@@ -74,10 +74,12 @@ export default function App() {
     const u1 = listen("cluddy:hotkey", () => handleHotkey());
     const u2 = listen("cluddy:panel", () => handleTogglePanel());
     const u3 = listen("cluddy:text_mode", () => handleTextMode());
+    const u4 = listen("cluddy:buddy", () => window.dispatchEvent(new Event("lensys:cycle-buddy")));
     return () => {
       u1.then((f) => f());
       u2.then((f) => f());
       u3.then((f) => f());
+      u4.then((f) => f());
     };
   }, [handleHotkey, handleTogglePanel, handleTextMode]);
 

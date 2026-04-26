@@ -569,6 +569,15 @@ pub fn run() {
                     }
                 })?;
 
+            // Ctrl+Shift+B — cycle the visible buddy
+            let win_b = win.clone();
+            app.global_shortcut()
+                .on_shortcut("Ctrl+Shift+B", move |_app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        win_b.emit("cluddy:buddy", ()).ok();
+                    }
+                })?;
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

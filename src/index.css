@@ -197,6 +197,20 @@ textarea,
     radial-gradient(circle at 68% 72%, rgba(45, 212, 191, 0.35), transparent 34%);
 }
 
+.buddy-wrap[data-state="connecting"] .buddy-sparkle {
+  background:
+    radial-gradient(circle at 32% 28%, rgba(251, 191, 36, 0.52), transparent 34%),
+    radial-gradient(circle at 70% 72%, rgba(14, 165, 233, 0.32), transparent 34%);
+  animation-duration: 0.8s;
+}
+
+.buddy-wrap[data-state="ready"] .buddy-sparkle,
+.buddy-wrap[data-state="phrases"] .buddy-sparkle {
+  background:
+    radial-gradient(circle at 28% 28%, rgba(52, 211, 153, 0.42), transparent 34%),
+    radial-gradient(circle at 68% 70%, rgba(125, 211, 252, 0.28), transparent 32%);
+}
+
 .buddy-wrap[data-state="alert"] .buddy-sparkle {
   background:
     radial-gradient(circle at 36% 26%, rgba(248, 113, 113, 0.5), transparent 34%),
